@@ -1,0 +1,14 @@
+[project]
+name="waivers-converter"
+requires-python = ">=3.9"
+version="0.0.0"
+description="waivers-converter"
+authors= [
+  {name = "Antmicro"}
+]
+dependencies=[
+  "pyyaml",
+]
+
+[project.scripts]
+waivers-converter = "waivers_converter.waivers_converter:main"
