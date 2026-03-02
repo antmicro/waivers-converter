@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "StringArray": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "StringOrNumberArray": {
+      "type": "array",
+      "items": { "type": ["string", "number"] }
+    },
+    "ExclusionEntry": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          { "type": ["string", "number"] },
+          {
+            "type": "object",
+            "patternProperties": {
+              "^.*$": {
+                "$comment": "Name of the exclusion",
+                "$ref": "#/$defs/StringOrNumberArray"
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  "type": "object",
+  "properties": {
+    "schema_version": { "type": "integer" }
+  },
+  "patternProperties": {
+    "^.*$": {
+      "$comment": "Top blocks (e.g. AXI, MCU, I3C)",
+      "type": "object",
+      "properties": {
+        "fully_excluded_modules": {
+          "type": "object",
+          "patternProperties": {
+            "^.*$": {
+              "$comment": "{ <REASON>: [ <MODULE1>, ... ]  }",
+              "$ref": "#/$defs/StringArray"
+            }
+          }
+        }
+      },
+      "patternProperties": {
+        "^.*$": {
+          "$comment": "Modules",
+          "type": "object",
+          "properties": {
+            "source_path": { "type": "string" },
+            "source_sha": { "type": "string" },
+            "fully_excluded_instances": {
+              "type": "object",
+              "patternProperties": {
+                "^.*$": {
+                  "$comment": "{ <REASON>: [ <INSTANCE1>, ... ]  }",
+                  "$ref": "#/$defs/StringArray"
+                }
+              }
+            }
+          },
+          "patternProperties": {
+            "^.*$": {
+              "$comment": "Instances of the module",
+              "type": "object",
+              "patternProperties": {
+                "^.*$": {
+                  "$comment": "{ <REASON>: [ <EXCLUSION TYPE>, ... ]  }",
+                  "type": "object",
+                  "properties": {
+                    "toggle": { "$ref": "#/$defs/ExclusionEntry" },
+                    "toggle_01": { "$ref": "#/$defs/ExclusionEntry" },
+                    "toggle_10": { "$ref": "#/$defs/ExclusionEntry" },
+                    "branch": { "$ref": "#/$defs/ExclusionEntry" },
+                    "line": { "$ref": "#/$defs/ExclusionEntry" },
+                    "cond": { "$ref": "#/$defs/ExclusionEntry" },
+                    "fsm": { "$ref": "#/$defs/ExclusionEntry" },
+                    "assert": { "$ref": "#/$defs/ExclusionEntry" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

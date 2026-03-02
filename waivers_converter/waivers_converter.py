@@ -2,142 +2,191 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
-from collections.abc import Callable
 from pathlib import Path
 import sys
+from typing import Any, Generator, Union, cast
 import yaml
 
+from .common import (
+    INSTANCE_EXCLUDE,
+    MODULE_EXCLUDE,
+    MODULE_SPECIFIC,
+    SOURCE_PATH,
+    SPECIAL_KEYS,
+    Emitter,
+    ToggleDirection,
+    eprint,
+)
 
-TOP_COMMENT = 'File generated automatically, see comments above waiver groups for their sources'
+# Backends
+from .el_backend import ELEmitter
+from .md_backend import MDEmitter
 
 
-class Waiver:
-    def __init__(self, definition : str, type : str):
-        self.definition : str = definition
-        self.type : str = type
-
-
-class SignalWaiver(Waiver):
-    def __init__(self, prefix_with_top : bool, definition : str):
-        super().__init__(definition, 'signal')
-        self.prefix_with_top : bool = prefix_with_top
-
-
-class WaiversDef:
-    SIGNAL_TYPE_KEY = 'signals-type'
-    DEFAULT_SIGNAL_TYPE = 'partial'
-
-    class IgnoredException(Exception):
-        def __init__(self, cause : str):
-            self.cause : str = cause
-
-    def __init__(self, top : str, path : Path, name : str, def_keys : dict[str, dict]):
-        self.name : str = name
-        self.path : Path = path
-        self.waivers : list[Waiver] = []
-
-        warn: Callable[[str], None] = lambda line: print(f'{name}: {line}')
-
-        except_values : list[str] = def_keys.pop('except', [])
-        if top in except_values:
-            raise self.IgnoredException(f'top in "except": {except_values}')
-
-        only_values : list[str] = def_keys.pop('only', [top])
-        if top not in only_values:
-            raise self.IgnoredException(f'top not in "only": {only_values}')
-
-        signal_type : str = def_keys.pop(self.SIGNAL_TYPE_KEY, self.DEFAULT_SIGNAL_TYPE)
-        if signal_type not in ['full', 'partial']:
-            warn(f'Invalid {self.SIGNAL_TYPE_KEY}: {signal_type}')
-            signal_type = self.DEFAULT_SIGNAL_TYPE
-        prefix_with_top : bool = signal_type == 'partial'
-
-        # Note that `pop` was used before so the keys above aren't in def_keys anymore.
-        for key in def_keys:
-            if key == 'signals':
-                for definition in def_keys['signals']:
-                    self.waivers.append(SignalWaiver(prefix_with_top, definition))
-            elif key in ['files', 'modules']:
-                for definition in def_keys[key]:
-                    self.waivers.append(Waiver(definition, type=key.removesuffix('s')))
+def expand_range(items: Union[str, int, list[Union[str, int]]]) -> Generator[int, None, None]:
+    if isinstance(items, list):
+        for it in items:
+            if isinstance(it, int):
+                yield it
             else:
-                warn(f'Unsupported key: {key}')
+                start, end = sorted(int(x) for x in it.split("-"))
+                yield from range(start, end + 1)
+    elif isinstance(items, str):
+        start, end = sorted(int(x) for x in items.split("-"))
+        yield from range(start, end + 1)
+    else:
+        yield items
 
 
-def parse_waivers_file(path : Path, top : str) -> list[WaiversDef]:
-    print(f'Parsing {path}...')
-    with open(path) as f:
-        data : dict = yaml.safe_load(f)
+def expand_toggles(bits: Union[str, int]) -> list[Union[int, tuple[int, int]]]:
+    if isinstance(bits, int):
+        return [bits]
 
-    waiver_defs : list[WaiversDef] = []
-    for def_name, def_keys in data.items():
-        try:
-            waiver_defs.append(WaiversDef(top, path, def_name, def_keys))
-        except WaiversDef.IgnoredException as e:
-            print(f'{def_name}: Ignoring due to {e.cause}')
-            continue
-    return waiver_defs
-
-
-class CmCfg:
-    @staticmethod
-    def _get_keyword(waiver : Waiver):
-        if waiver.type == 'signal':
-            return 'node'
-        return waiver.type
-
-    def __init__(self, top : str):
-        self.lines = [
-            f'// {TOP_COMMENT}',
-            f'+tree {top}',
-            f'-module {top}',
-            '',
-        ]
-        self.top = top
-        self.signal_waivers = {}
-
-    def add_waivers(self, waivers_def : WaiversDef):
-        full_name = f'{waivers_def.path} : {waivers_def.name}'
-        self.lines.append(f'// {full_name}')
-        for waiver in waivers_def.waivers:
-            definition = waiver.definition
-            if isinstance(waiver, SignalWaiver) and waiver.prefix_with_top:
-                definition = f"{self.top}.*{definition}"
-            self.lines.append(f'-{self._get_keyword(waiver)} {definition}')
-        self.lines.append('')
-
-    def save(self, output : Path):
-        with open(output, 'wt') as file:
-            file.write('\n'.join(self.lines))
+    result: list[Union[int, tuple[int, int]]] = []
+    for part in bits.split(";"):
+        if "-" in part:
+            start, end = sorted(int(x) for x in part.split("-"))
+            result.append((start, end))
+        else:
+            result.append(int(part))
+    return result
 
 
-OUTPUT_CONVERTERS = {
-    'cm.cfg': CmCfg,
-}
+def exclude_instance(emitter: Emitter, items: dict[str, dict[str, list[Union[str, int, dict[Union[str, int], list[Union[str, int]]]]]]]):
+    for reason, coverage in items.items():
+        emitter.set_reason(reason)
 
+        for coverage_type, coverage_data in coverage.items():
+            if coverage_type == "line":
+                # This is a safe assumption based on the schema
+                for line in expand_range(cast(list[Union[str, int]], coverage_data)):
+                    emitter.exclude_line(line)
+            elif coverage_type == "branch":
+                for value in coverage_data:
+                    if isinstance(value, dict):
+                        for branch, vectors in value.items():
+                            for vector in expand_range(vectors):
+                                emitter.exclude_branch(branch, vector)
+                            break
+                    else:
+                        for branch in expand_range(value):
+                            emitter.exclude_branch(branch, None)
+            elif coverage_type == "cond":
+                for value in coverage_data:
+                    if isinstance(value, dict):
+                        for cond, rows in value.items():
+                            for r in rows:
+                                emitter.exclude_cond(cond, str(r))
+                            break
+                    else:
+                        for cond in expand_range(value):
+                            emitter.exclude_cond(cond, None)
+            elif coverage_type == "fsm":
+                for value in coverage_data:
+                    if isinstance(value, str):
+                        emitter.exclude_fsm(value, None)
+                    elif isinstance(value, dict):
+                        for name, transitions in value.items():
+                            for t in transitions:
+                                emitter.exclude_fsm(str(name), str(t))
+                            break
+                    else:
+                        eprint(f"Invalid format for an fsm exclusion: {value}")
+            elif coverage_type == "assert":
+                for value in coverage_data:
+                    if isinstance(value, str):
+                        emitter.exclude_assert(value)
+                    else:
+                        eprint(f"Invalid format for an assert exclusion: {value}")
+            elif coverage_type in ("toggle", "toggle_01", "toggle_10"):
+                dir: ToggleDirection = None
+                if coverage_type == "toggle_10":
+                    dir = "1->0"
+                elif coverage_type == "toggle_01":
+                    dir = "0->1"
+
+                for value in coverage_data:
+                    if isinstance(value, str):
+                        emitter.exclude_toggle(value, dir, None)
+                    elif isinstance(value, dict):
+                        for name, bits in value.items():
+                            for b in bits:
+                                emitter.exclude_toggle(str(name), dir, expand_toggles(b))
+                            break
+            else:
+                eprint(f"Unknown coverage type: {coverage_type}")
+
+
+def exclude_fully(emitter: Emitter, items: dict[str, list[str]], instance: bool):
+    for reason, objects in items.items():
+        emitter.set_reason(reason)
+        for v in objects:
+            if instance:
+                emitter.start_instance(v)
+            else:
+                emitter.start_module(v, None)
+
+            emitter.exclude_fully()
+
+            if instance:
+                emitter.end_instance()
+            else:
+                emitter.end_module()
 
 def main():
+    all_emitters: dict[str, type[Emitter]] = {
+        "el": ELEmitter,
+        "md": MDEmitter,
+    }
+
     parser = argparse.ArgumentParser()
-    parser.add_argument('waiver_files', type=Path, nargs='+', help='Yaml files with waiver definitions')
-    parser.add_argument('-o', '--output', type=Path, required=True, help='Output path for the created file with waivers')
-    parser.add_argument('--top', type=str, required=True, help='Top level module name')
+    parser.add_argument("--format", type=str, required=True)
+    parser.add_argument("--design", type=str)
+    parser.add_argument("input", type=str)
+    parser.add_argument("output", type=str)
     args = parser.parse_args()
 
-    filename: str = args.output.name
-    print(f'Converting waivers for top={args.top}, output type: {filename}')
-
-    if filename not in OUTPUT_CONVERTERS:
-        print(f'Unknown file type: {filename}')
+    if args.format not in all_emitters:
+        print(f"Format '{args.format}' does not exist, available formats: {', '.join(all_emitters.keys())}")
         sys.exit(1)
-    converter: type = OUTPUT_CONVERTERS[filename]
 
-    waivers_defs : list[WaiversDef] = []
-    for file in args.waiver_files:
-        waivers_defs.extend(parse_waivers_file(file, args.top))
+    emitter = all_emitters[args.format](args.design)
 
-    cm_hier = converter(args.top)
-    for waivers_def in waivers_defs:
-        cm_hier.add_waivers(waivers_def)
-    cm_hier.save(args.output)
+    with Path(args.input).open("rt") as file:
+        content = yaml.safe_load(file)
 
-    print(f'Output saved in {args.output}')
+    for block, module in cast(dict[str, Any], content).items():
+        emitter.start_block(block)
+
+        for module_name, instances in cast(dict[str, Any], module).items():
+            if module_name == MODULE_EXCLUDE:
+                exclude_fully(emitter, instances, instance=False)
+                continue
+            elif module is SPECIAL_KEYS:
+                continue
+
+            emitter.start_module(module_name, instances.get(SOURCE_PATH))
+
+            for instance_name, instance in instances.items():
+                if instance_name == INSTANCE_EXCLUDE:
+                    exclude_fully(emitter, instance, instance=True)
+                    continue
+                elif instance_name == MODULE_SPECIFIC:
+                    pass
+                elif instance_name in SPECIAL_KEYS:
+                    continue
+
+                has_instance = instance_name != MODULE_SPECIFIC
+                if has_instance:
+                    emitter.start_instance(instance_name)
+
+                exclude_instance(emitter, instance)
+
+                if has_instance:
+                    emitter.end_instance()
+
+            emitter.end_module()
+
+        emitter.end_block()
+
+    Path(args.output).write_text(emitter.stringify())

@@ -8,6 +8,8 @@ authors= [
 ]
 dependencies=[
   "pyyaml",
+  "tabulate",
+  "lxml",
 ]
 
 [project.scripts]
