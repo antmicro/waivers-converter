@@ -20,9 +20,9 @@ Supported formats are:
 ```yaml
 top:                                 # Name of the block, there can be multiple blocks in the file
   sample_module:                     # Name of the module for which the exclusions should apply
-                                     # If the name is `all` the exclusions apply to the entire module
     source_path: "some/file/module.sv"
     sample_instance:                 # Name of an instance of the `sample_module` module, for which the exclusions below should apply
+                                     # If the name is `all` the exclusions apply to the entire module instead
       Exclusion reason:
         line: [10-20, 168]           # Exclude lines 10-20 and 168 from "some/file/module.sv"
         toggle:                      # Both 0->1 and 1->0 transitions will be excluded
